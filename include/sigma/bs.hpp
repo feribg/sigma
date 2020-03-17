@@ -33,7 +33,7 @@ struct BSAnalyticResult {
 };
 
 struct BSFDResult {
-  xt::xtensor<double,2> S, C, delta, gamma, theta, vega;
+  xt::xtensor<double, 2> S, C, delta, gamma, theta, vega;
   [[nodiscard]] std::string toString() const
   {
       return "result";
@@ -134,7 +134,9 @@ xt::xtensor<BSAnalyticResult, 1> bs_analytic_batch(
     return bs_analytic_vectorizer(S, K, r, sigma, div, T, payoff);
 }
 
-BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Payoff payoff, Style style, double rec_dx,
+
+BSFDResult fd(unsigned long M, double K, double r, double sigma, double div, double T, Payoff payoff, Style style,
+        double rec_dx,
         double rec_dt)
 {
     // Step sizes:
@@ -143,12 +145,13 @@ BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Pa
     if (rec_dt!=0 && rec_dx!=0) {
         dt = rec_dt;
         dx = rec_dx;
-    }else{
+    }
+    else {
         dt = T/((double) M-1);
         dx = sigma*sqrt(dt);
     }
 
-    const double sigma_sq  = gcem::sq(sigma);
+    const double sigma_sq = gcem::sq(sigma);
     const double alpha = 0.5*sigma_sq;  // diffusivity in heat equation
     const double dn = alpha*dt/(dx*dx);  // diffusion number
 
@@ -158,26 +161,28 @@ BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Pa
     const double L2 = 1.5;
     const unsigned long N = ceil((L2-L1)/dx+1);
 
-    xt::xtensor<double,2> x = xt::view(xt::linspace<double>(L1, L2, N), xt::newaxis(), xt::all());
-    xt::xtensor<double,1> t = xt::linspace<double>(0, T, M);
-    xt::xtensor<double,2> tau = xt::expand_dims(t, 1);
+    xt::xtensor<double, 2> x = xt::linspace<double>(L1, L2, N).reshape({1, N});
+    xt::xtensor<double, 2> tau = xt::linspace<double>(0, T, M).reshape({M, 1});
+
 
     xt::xtensor<double, 2> S = (K*xt::exp(x-(r-div-0.5*sigma_sq)*tau));
-    xt::xtensor<double, 2> S_init = xt::view(S, xt::all(), N-1, xt::newaxis());
+    auto S_init = xt::view(S, xt::all(), N-1, xt::newaxis());
     // Solution matrix, solve backwards where idx = 0 is exp, idx = N is today
-    xt::xtensor<double, 2> U = xt::eval(xt::zeros<double>({M, (long) N}));
+    xt::xtensor<double, 2> U ({ M, N});
     auto U_first_col_v = xt::view(U, xt::all(), 0);
     auto S_first_col_v = xt::view(S, xt::all(), 0);
     auto S_first_row_v = xt::view(S, 0, xt::all());
     auto U_first_row_v = xt::view(U, 0, xt::all());
 
     // Boundary condition and exercice region
+    xt::xtensor<double, 2> bound;
     if (payoff==CALL) {
         auto U_last_col_v = xt::view(U, xt::all(), N-1);
         if (style==EU) {
             U_last_col_v = xt::flatten(xt::exp(r*tau)*xt::maximum(xt::exp(-div*tau)*S_init-K*xt::exp(-r*tau), 0));
         }
         else {
+            bound = exp(r*tau)*(xt::view(S, xt::all(), xt::range(1,N-1))-K);
             U_last_col_v = xt::flatten(xt::maximum(xt::maximum(S_init-K, 0)*xt::exp(r*tau),
                     xt::exp(r*tau)*xt::maximum(xt::exp(-div*tau)*S_init-K*xt::exp(-r*tau), 0)));
         }
@@ -189,6 +194,7 @@ BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Pa
             U_first_col_v = K-S_first_col_v*xt::exp(r*tau); // Merton Bound
         }
         else {
+            bound = exp(r*tau)*(K-xt::view(S, xt::all(), xt::range(1,N-1)));
             U_first_col_v = (K-S_first_col_v)*xt::exp(r*tau);  // early exercise-need to double check for Calls!
         }
         auto U_last_col_v = xt::view(U, xt::all(), N-1);
@@ -198,12 +204,15 @@ BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Pa
 
     // Tridiagonal scheme equations
     const double theta_ = 1./2.;  //TODO: may want to alter this through time, in which case just place in loop below
-    xt::xtensor<double, 2> ones_tmp = xt::ones<double>({(long) N-2, 1L});
-    xt::xtensor<double, 1> main_diag = xt::flatten((1.+2.*theta_*dn)*ones_tmp);
-    xt::xtensor<double, 1> off_diag = xt::flatten(-theta_*dn*ones_tmp);
+    xt::xtensor<double, 1> main_diag({N-2}, 1. + 2. * theta_*dn);
+    xt::xtensor<double, 1> off_diag({N-2}, -theta_*dn);
+
+    xt::xtensor<double, 2> D = xt::xtensor<double, 2>::from_shape({{M, N-2}});
+    const double cutoff = gcem::pow(10.0, -3);
+    double w = 1.5; // step size
 
     for (long i = 1; i<M; i++) {
-        xt::xtensor<double, 1> d = xt::xtensor<double, 1>::from_shape({N-2});
+        auto d = xt::view(D, i-1, xt::all());
         for (long j = 1; j<N-1; j++) {
             d(j-1) = (1-theta_)*dn*U(i-1, j+1)+(1-2*(1-theta_)*dn)*U(i-1, j)+(
                     1-theta_)*dn*U(i-1, j-1);
@@ -213,99 +222,77 @@ BSFDResult fd(long M, double K, double r, double sigma, double div, double T, Pa
 
         if (style==EU) {
             xt::xtensor<double, 1> U_tmp_v = xt::view(U, i, xt::range(1, N));
+            //TODO: verify and test EU case
             algo::thomas_tridiag(main_diag, off_diag, off_diag, d, U_tmp_v);
         }
         else {
             // Solve for american in explicit SOR
             double err = std::numeric_limits<double>::infinity();
-            const double cutoff = gcem::pow(10.0, -3);
+            auto step_result_v = xt::view(U, i, xt::range(1, N-1));
+            step_result_v = d;
+            auto current_bound = xt::view(bound, i, xt::all());
+            while (err>cutoff) {
+                err = algo::gs_tridiag_step(step_result_v, current_bound, main_diag, off_diag, off_diag, d, N-3, w);
+                //TODO: add convergence test
+            }
 
-            xt::xtensor<double, 1> U_initial = xt::eval(d);
-            double w = 1.5; // step size
-            auto S_current_v = xt::view(S, i, xt::range(1, N-1));
-            xt::xtensor<double, 1> U_next;
-            if (payoff==CALL) {
-                while(err > cutoff){
-                    xt::xtensor<double,1> step_result = U_initial;
-                    //TODO: look into minimizing copies here
-                    algo::gs_tridiag_step(U_initial, main_diag, off_diag, off_diag, d, N-2, step_result);
-                    auto lhs = (1-w)*U_initial+w*step_result;
-                    auto rhs = exp(r*tau(i,0))*(S_current_v-K);
-                    U_next = xt::maximum(lhs,rhs);
-                    err = xt::linalg::norm(U_next - U_initial, xt::linalg::normorder::inf);
-                    U_initial = U_next;
-                    //TODO: add convergence test
-                }
-            }
-            else {
-                while(err > cutoff){
-                    //TODO: look into minimizing copies here
-                    auto step_result = U_initial;
-                    algo::gs_tridiag_step(U_initial, main_diag, off_diag, off_diag, d, N-2, step_result);
-                    U_next = xt::amax(xt::hstack(xt::xtuple(
-                            (1-w)*U_initial+w*step_result,
-                            exp(r*tau(i))*(K-S_current_v)
-                            )));
-                    err = xt::linalg::norm(U_next - U_initial, xt::linalg::normorder::inf);
-                    U_initial = U_next;
-                    //TODO: add convergence test
-                }
-            }
-            auto U_current_row_v = xt::view(U, i, xt::range(1, N-1));
-            U_current_row_v = U_next;
         }
     }
     // put back into C out of U
-    xt::xtensor<double, 2> ones_N = xt::ones<double>({1L, (long)N});
-    xt::xtensor<double, 2> C = xt::exp(-r * tau * ones_N) * U;
+    xt::xtensor<double, 2> C = xt::exp(-r*tau)*U;
 
     // Greeks: chain rule with (x, tau) cordinates, central diff for Delta and Gamma
     // delta
     auto dc_dx_v1 = xt::view(C, xt::all(), xt::range(2, _));
-    auto dc_dx_v2 = xt::view(C, xt::all(), xt::range(0,N-2));
-    xt::xtensor<double, 2> dc_dx = (dc_dx_v1 - dc_dx_v2) / (2 * dx);
+    auto dc_dx_v2 = xt::view(C, xt::all(), xt::range(0, N-2));
+    xt::xtensor<double, 2> dc_dx = (dc_dx_v1-dc_dx_v2)/(2*dx);
     //TODO: avoid aliasing extra copy by folding it above
 
-    auto dc_dx_v = xt::concatenate(xtuple(xt::view(dc_dx, xt::all(), 0, xt::newaxis()), dc_dx, xt::view(dc_dx, xt::all(), N-3, xt::newaxis())), 1);
-    xt::xtensor<double,2> delta = dc_dx_v / S;
+    auto dc_dx_v = xt::concatenate(
+            xtuple(xt::view(dc_dx, xt::all(), 0, xt::newaxis()), dc_dx, xt::view(dc_dx, xt::all(), N-3, xt::newaxis())),
+            1);
+    xt::xtensor<double, 2> delta = dc_dx_v/S;
     // gamma
-    xt::xtensor<double, 2> dc2_dx2 = xt::diff(C, 2, 1) / (dx * dx);
-    auto dc2_dx2_v = xt::concatenate(xtuple(xt::view(dc2_dx2, xt::all(), 0, xt::newaxis()), dc2_dx2, xt::view(dc2_dx2, xt::all(), N-3, xt::newaxis())), 1);
-    auto chain = dc2_dx2_v - dc_dx_v;
-    xt::xtensor<double, 2> gamma = chain / (S * S);
+    xt::xtensor<double, 2> dc2_dx2 = xt::diff(C, 2, 1)/(dx*dx);
+    auto dc2_dx2_v = xt::concatenate(xtuple(xt::view(dc2_dx2, xt::all(), 0, xt::newaxis()), dc2_dx2,
+            xt::view(dc2_dx2, xt::all(), N-3, xt::newaxis())), 1);
+    auto chain = dc2_dx2_v-dc_dx_v;
+    xt::xtensor<double, 2> gamma = chain/(S*S);
     //TODO: why hardcode the threshold to 2
-    filtration(gamma, S < 2.0) = 0.;  // fix boundary errors
+    filtration(gamma, S<2.0) = 0.;  // fix boundary errors
 
     // Numerical theta, Forward difference for Thetas
-    xt::xtensor<double,2> zeros = xt::zeros<double>({1L, (long)N});
+    xt::xtensor<double, 2> zeros = xt::zeros<double>({1L, (long) N});
 
-    xt::xtensor<double, 2> dc_dtau = xt::concatenate(xtuple(zeros, xt::diff(C, 1, 0)), 0) /  dt;  //TODO: stability check here for dt ~ 0 ?
-    xt::xtensor<double, 2> theta = - dc_dx_v * (r - div - 0.5 * sigma_sq) - dc_dtau;
+    xt::xtensor<double, 2> dc_dtau =
+            xt::concatenate(xtuple(zeros, xt::diff(C, 1, 0)), 0)/dt;  //TODO: stability check here for dt ~ 0 ?
+    xt::xtensor<double, 2> theta = -dc_dx_v*(r-div-0.5*sigma_sq)-dc_dtau;
     xt::view(theta, 0, xt::all()) = 0;
     // Analytic theta
     //theta = -0.5 * (sigma_sq) * (S * S) * gamma  // look into effect of IR/Div
 
     // Numeric vega
     xt::xtensor<double, 2> vega;
-    if(style == EU && (rec_dt==0 && rec_dx==0)){
-        vega = (sigma * tau * ones_N) * (S * S * gamma);
-    }else if(rec_dt==0 && rec_dx==0){
+    if (style==EU && (rec_dt==0 && rec_dx==0)) {
+        vega = (sigma*tau)*(S*S*gamma);
+    }
+    else if (rec_dt==0 && rec_dx==0) {
         auto dvol = 0.05; //TODO: what's the correct value here should be % rather than absolute
         auto res1 = bs::fd(M, K, r, sigma+dvol, div, T, payoff, style, dx, dt);
         auto res2 = bs::fd(M, K, r, sigma-dvol, div, T, payoff, style, dx, dt);
-        vega = (res1.C - res2.C - delta * (res1.S - res2.S) - 0.5 * gamma * (gcem::sq(res1.S - S) - gcem::sq(res2.S - S))) / (2 * dvol);
+        vega = (res1.C-res2.C-delta*(res1.S-res2.S)-0.5*gamma*(gcem::sq(res1.S-S)-gcem::sq(res2.S-S)))/(2*dvol);
 
         //faster(only one more loop) but less accurate
         //auto res1 = fd(M, K, r, div, T, sigma + dvol, style, payoff, (dx, dt))
         //vega = (res1.C - C - delta * (res1.S - S) - 0.5 * gamma * ((res1.S - S) ** 2)) / dvol
     }
     return BSFDResult{
-        .S=std::move(S),
-        .C=std::move(C),
-        .delta=std::move(delta),
-        .gamma=std::move(gamma),
-        .theta=std::move(theta),
-        .vega=std::move(vega),
+            .S=std::move(S),
+            .C=std::move(C),
+            .delta=std::move(delta),
+            .gamma=std::move(gamma),
+            .theta=std::move(theta),
+            .vega=std::move(vega),
 
     };
 }

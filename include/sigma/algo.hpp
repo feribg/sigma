@@ -1,5 +1,7 @@
 #pragma once
 #include "utils.hpp"
+#include "smath.hpp"
+#include "xtensor/xtensor.hpp"
 
 namespace algo {
 
@@ -45,30 +47,48 @@ static inline void thomas_tridiag(
 
 //TODO: vectorize if possible
 /**
- * Naive grid step implementation for the path dependent case
- * @param x
+ * Gauss Siedel tridiagonal solver
+ * @param x_end
+ * @param x_start
+ * @param bound
  * @param a
  * @param b
  * @param c
  * @param d
  * @param n
- * @param x_result
+ * @param w
+ * @return
  */
-static inline void gs_tridiag_step(
-        const xt::xtensor<double,1>& x,
+template <class V1, class V2, class V3>
+static inline double gs_tridiag_step(
+        V1& x_end,
+        const V2& bound,
         const xt::xtensor<double,1>& a,
         const xt::xtensor<double,1>& b,
         const xt::xtensor<double,1>& c,
-        const xt::xtensor<double,1>& d,
+        const V3& d,
         unsigned long n,
-        xt::xtensor<double, 1>& x_result)
+        double w)
 {
-    n = n-1; //TODO do we need that
-    x_result(0) = (d(0)-b(0)*x_result(1))/a(0);
+    double err = 0.0;
+    auto init = x_end(0);
+    auto next_gs = (d(0)-b(0)*x_end(1))/a(0);
+    auto next_bound = std::max((1-w)*init+w*next_gs, bound(0));
+    x_end(0) = next_bound;
+    err = std::max(err, std::abs(next_bound - init));
     for (auto i = 1; i<n; i++) {
-        x_result(i) = (d(i)-c(i-1)*x_result(i-1)-b(i)*x_result(i+1))/a(i);
+        init = x_end(i);
+        next_gs = (d(i)-c(i-1)*next_gs-b(i)*x_end(i+1))/a(i);
+        next_bound = std::max((1-w)*init+w*next_gs, bound(i));
+        x_end(i) = next_bound;
+        err = std::max(err, std::abs(next_bound - init));
     }
-    x_result(n) = (d(n)-c(n-1)*x_result(n-1))/a(n);
+    init = x_end(n);
+    next_gs = (d(n)-c(n-1)*next_gs)/a(n);
+    next_bound = std::max((1-w)*init+w*next_gs, bound(n));
+    x_end(n) = next_bound;
+    err = std::max(err, std::abs(next_bound - init));
+    return err; //inf norm
 }
 
 }
